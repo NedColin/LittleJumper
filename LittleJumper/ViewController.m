@@ -270,8 +270,8 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
             longPressGesture.delegate = self;
             UIPanGestureRecognizer * pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onPan:)];
             pan.delegate = self;
-            view.gestureRecognizers = @[pan,longPressGesture];
-            //view.gestureRecognizers = @[longPressGesture];
+//            view.gestureRecognizers = @[pan,longPressGesture];
+            view.gestureRecognizers = @[pan];
             view;
         });
     }
@@ -431,10 +431,32 @@ static CGPoint originPoint;
             //self.camera.eulerAngles = SCNVector3Make(euler.x + pinch, euler.y, euler.z);
             
             SCNVector3 rawPos = self.camera.position;
-            //x轴平移效果
-            self.camera.position = SCNVector3Make(rawPos.x + xdis, rawPos.y, rawPos.z - xdis);
-            //y轴
-            self.camera.position = SCNVector3Make(rawPos.x - xdis, rawPos.y + ydis, rawPos.z + xdis);
+            
+            int effect = 0;
+            switch (4) {
+                case 0:{
+                    //x轴平移效果
+                    self.camera.position = SCNVector3Make(rawPos.x + xdis, rawPos.y, rawPos.z - xdis);
+                }
+                    break;
+                case 1:{
+                    //z轴平移效果
+                    self.camera.position = SCNVector3Make(rawPos.x - xdis , rawPos.y, rawPos.z - xdis);
+                }
+                    break;
+                case 2:{
+                    //叠加效果 x轴平移效果 + y轴平移
+                    self.camera.position = SCNVector3Make(rawPos.x + xdis, rawPos.y + ydis, rawPos.z - xdis);
+                }
+                    break;
+                case 3:{
+                    //叠加效果 z轴平移效果 + y轴平移
+                    self.camera.position = SCNVector3Make(rawPos.x - xdis , rawPos.y + ydis, rawPos.z - xdis);
+                }
+                    break;
+                default:
+                    break;
+            }
             NSLog(@"x:%.2f y:%.2f z:%.2f",
                   self.camera.position.x,
                   self.camera.position.y,
