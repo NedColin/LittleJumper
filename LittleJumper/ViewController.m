@@ -9,6 +9,34 @@
 #import "ViewController.h"
 #import <SceneKit/SceneKit.h>
 
+@implementation NSObject (Util)
+
+- (NSArray *)createPipeLineState:(id <MTLDevice>)device{
+    
+    id <MTLLibrary> library = [device newDefaultLibrary];
+    
+    id <MTLFunction> vertexFunction = [library newFunctionWithName:@"vertexVideoShader"];
+    id <MTLFunction> fragmentFunction = [library newFunctionWithName:@"fragmentVideoShader"];
+    
+    MTLRenderPipelineDescriptor * renderPipeDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
+    
+    renderPipeDescriptor.vertexFunction = vertexFunction;
+    renderPipeDescriptor.fragmentFunction = fragmentFunction;
+    //必须和scnview的匹配
+    renderPipeDescriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
+    
+    NSError * error = nil;
+    
+    id <MTLRenderPipelineState> renderPipelineState = [device newRenderPipelineStateWithDescriptor:renderPipeDescriptor error:&error];
+
+    id <MTLCommandQueue> commondQueue = [device newCommandQueue];
+    
+    return @[renderPipelineState, commondQueue];
+}
+
+@end
+
+
 static const double kMaxPressDuration = 2.f;
 static const int kMaxPlatformRadius = 6;
 static const int kMinPlatformRadius = kMaxPlatformRadius-4;
@@ -22,7 +50,7 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
     CollisionDetectionMaskOldPlatform = 1 << 3,
 };
 
-@interface ViewController ()<SCNPhysicsContactDelegate, UIGestureRecognizerDelegate>
+@interface ViewController ()<SCNPhysicsContactDelegate, UIGestureRecognizerDelegate, SCNSceneRendererDelegate>
 @property (strong, nonatomic) IBOutlet UIControl *infoView;
 @property (strong, nonatomic) IBOutlet UILabel *scoreLabel;
 - (IBAction)restart;
@@ -34,7 +62,11 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
 @property(nonatomic, strong)SCNNode *jumper;
 @property(nonatomic, strong)SCNNode *camera,*light;
 @property(nonatomic, strong)NSDate *pressDate;
+@property(nonatomic, strong)SCNRenderer *render;
 @property(nonatomic)NSInteger score;
+
+@property(nonatomic, strong)id<MTLCommandQueue> commandQueue;
+@property(nonatomic, strong)id<MTLRenderPipelineState> renderPipelineState;
 
 @end
 
@@ -44,7 +76,34 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
     [super viewDidLoad];
     if(self.scnView && self.floor && self.jumper) {
         [self createFirstPlatform];
+        [self initRender];
     }
+}
+
+- (void)initRender{
+    self.scnView.delegate = self;
+//    if (self.scnView.device) {
+//        self.render = [SCNRenderer rendererWithDevice:self.scnView.device options:nil];
+//        self.render.scene = self.scnView.scene;
+//        self.render.delegate = self;
+//        self.render.pointOfView = self.scnView.scene.rootNode;
+//        NSLog(@"initRender:%@", self.render);
+//    }
+    NSArray * output = [self createPipeLineState:self.scnView.device];
+    self.renderPipelineState = output[0];
+    self.commandQueue = output[1];
+    
+    
+}
+
+
+
+- (void)initMetal{
+    
+}
+
+- (void)viewDidAppear:(BOOL)animated{
+    [super viewDidAppear:animated];
 }
 
 #pragma mark 添加第一个台子
@@ -54,6 +113,7 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
  @discussion 第一个台子造型固定，静态，会与小人碰撞，初始化完成后调整镜头位置
  */
 -(void)createFirstPlatform {
+    
     self.platform = ({
         SCNNode *node = [SCNNode node];
         node.geometry = ({
@@ -63,7 +123,7 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
         });
         node.physicsBody = ({
             SCNPhysicsBody *body = [SCNPhysicsBody staticBody];
-            body.restitution = 0;
+            body.restitution = 0.9;
             body.friction = 1;
             body.damping = 0;
             body.categoryBitMask = CollisionDetectionMaskPlatform;
@@ -270,8 +330,8 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
             longPressGesture.delegate = self;
             UIPanGestureRecognizer * pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onPan:)];
             pan.delegate = self;
-//            view.gestureRecognizers = @[pan,longPressGesture];
-            view.gestureRecognizers = @[pan];
+            view.gestureRecognizers = @[pan,longPressGesture];
+            //view.gestureRecognizers = @[pan];
             view;
         });
     }
@@ -356,7 +416,7 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
             node.camera.zFar = 200.f;
             node.camera.zNear = .1f;
             [self.scene.rootNode addChildNode:node];
-            //node.eulerAngles = SCNVector3Make(-0.7, 0.5, 0);
+            //node.eulerAngles = SCNVector3Make(-M_PI * 0.25, M_PI * 0.25, 0);
             node.eulerAngles = SCNVector3Make(-M_PI * 0.25, M_PI * 0.25, 0);
             node;
         });
@@ -426,41 +486,42 @@ static CGPoint originPoint;
             
             CGFloat pinch = ydis * 1e-1;
             
-            SCNVector3 euler = self.camera.eulerAngles;
+            SCNNode * camNode = self.camera;
+            SCNVector3 euler = camNode.eulerAngles;
             
             //self.camera.eulerAngles = SCNVector3Make(euler.x + pinch, euler.y, euler.z);
             
-            SCNVector3 rawPos = self.camera.position;
+            SCNVector3 rawPos = camNode.position;
             
-            int effect = 0;
-            switch (4) {
+//            /int effect = 0;
+            switch (3) {
                 case 0:{
                     //x轴平移效果
-                    self.camera.position = SCNVector3Make(rawPos.x + xdis, rawPos.y, rawPos.z - xdis);
+                    camNode.position = SCNVector3Make(rawPos.x + xdis, rawPos.y, rawPos.z - xdis);
                 }
                     break;
                 case 1:{
                     //z轴平移效果
-                    self.camera.position = SCNVector3Make(rawPos.x - xdis , rawPos.y, rawPos.z - xdis);
+                    camNode.position = SCNVector3Make(rawPos.x - xdis , rawPos.y, rawPos.z - xdis);
                 }
                     break;
                 case 2:{
                     //叠加效果 x轴平移效果 + y轴平移
-                    self.camera.position = SCNVector3Make(rawPos.x + xdis, rawPos.y + ydis, rawPos.z - xdis);
+                    camNode.position = SCNVector3Make(rawPos.x + xdis, rawPos.y + ydis, rawPos.z - xdis);
                 }
                     break;
                 case 3:{
                     //叠加效果 z轴平移效果 + y轴平移
-                    self.camera.position = SCNVector3Make(rawPos.x - xdis , rawPos.y + ydis, rawPos.z - xdis);
+                    camNode.position = SCNVector3Make(rawPos.x - xdis , rawPos.y + ydis, rawPos.z - xdis);
                 }
                     break;
                 default:
                     break;
             }
             NSLog(@"x:%.2f y:%.2f z:%.2f",
-                  self.camera.position.x,
-                  self.camera.position.y,
-                  self.camera.position.z);
+                  camNode.position.x,
+                  camNode.position.y,
+                  camNode.position.z);
         }
             break;
         case UIGestureRecognizerStateEnded:
@@ -480,4 +541,54 @@ static CGPoint originPoint;
     return YES;
 }
 
+- (void)renderer:(id <SCNSceneRenderer>)renderer willRenderScene:(SCNScene *)scene atTime:(NSTimeInterval)time{
+    
+    id <MTLDevice> device = renderer.device;
+    MTLRenderPassDescriptor * renderPassDescriptor = self.scnView.currentRenderPassDescriptor;
+    if (!renderPassDescriptor) {
+        return;
+    }
+    id <MTLCommandBuffer> commandBuffer = [self.commandQueue commandBuffer];
+    
+    //id <MTLRenderCommandEncoder> renderCommandEncoder = [commandBuffer renderCommandEncoderWithDescriptor:renderPassDescriptor];
+    id <MTLRenderCommandEncoder> renderCommandEncoder = renderer.currentRenderCommandEncoder;
+    if (!renderCommandEncoder) {
+        return;
+    }
+    renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(1.0, 1.0, 1.0, 1.0f);
+    [renderCommandEncoder setViewport:(MTLViewport){0, 0, 300, 300, -1.0, 1.0}];
+    if (!self.renderPipelineState) {
+        return;
+    }
+    
+    
+    id <MTLLibrary> library = [device newDefaultLibrary];
+    id <MTLFunction> vertexFunction = [library newFunctionWithName:@"vertexVideoShader"];
+    id <MTLFunction> fragmentFunction = [library newFunctionWithName:@"fragmentVideoShader"];
+    MTLRenderPipelineDescriptor * renderPipeDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
+    renderPipeDescriptor.vertexFunction = vertexFunction;
+    renderPipeDescriptor.fragmentFunction = fragmentFunction;
+    renderPipeDescriptor.colorAttachments[0].pixelFormat = renderer.colorPixelFormat;
+    NSError * error = nil;
+    NSLog(@"========>renderer.colorPixelFormat:%lu", (unsigned long)renderer.colorPixelFormat);
+    id <MTLRenderPipelineState> renderPipelineState = [device newRenderPipelineStateWithDescriptor:renderPipeDescriptor error:&error];
+    [renderCommandEncoder setRenderPipelineState:renderPipelineState];
+    
+    //[renderCommandEncoder setRenderPipelineState:self.renderPipelineState];
+    
+    [renderCommandEncoder endEncoding];
+    
+    
+    [commandBuffer commit];
+    
+    NSLog(@"willRenderScene");
+    
+}
+
 @end
+
+
+
+
+
+
