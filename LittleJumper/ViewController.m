@@ -22,7 +22,7 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
     CollisionDetectionMaskOldPlatform = 1 << 3,
 };
 
-@interface ViewController ()<SCNPhysicsContactDelegate>
+@interface ViewController ()<SCNPhysicsContactDelegate, UIGestureRecognizerDelegate>
 @property (strong, nonatomic) IBOutlet UIControl *infoView;
 @property (strong, nonatomic) IBOutlet UILabel *scoreLabel;
 - (IBAction)restart;
@@ -70,7 +70,7 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
             body.collisionBitMask = CollisionDetectionMaskJumper|CollisionDetectionMaskPlatform|CollisionDetectionMaskOldPlatform;
             body;
         });
-        node.position = SCNVector3Make(0, 1, 0);
+        node.position = SCNVector3Make(0, 0, 0);
         [self.scene.rootNode addChildNode:node];
         node;
     });
@@ -267,7 +267,11 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
             [self.view addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"V:|-0-[view]-0-|" options:0 metrics:nil views:NSDictionaryOfVariableBindings(view)]];
             UILongPressGestureRecognizer *longPressGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(accumulateStrength:)];
             longPressGesture.minimumPressDuration = 0;
-            view.gestureRecognizers = @[longPressGesture];
+            longPressGesture.delegate = self;
+            UIPanGestureRecognizer * pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onPan:)];
+            pan.delegate = self;
+            view.gestureRecognizers = @[pan,longPressGesture];
+            //view.gestureRecognizers = @[longPressGesture];
             view;
         });
     }
@@ -330,7 +334,8 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
                 body.collisionBitMask = CollisionDetectionMaskPlatform|CollisionDetectionMaskFloor|CollisionDetectionMaskOldPlatform;
                 body;
             });
-            node.position = SCNVector3Make(0, 12.5, 0);
+            //高度必须大于等于2
+            node.position = SCNVector3Make(0, 1.9, 0);
             [self.scene.rootNode addChildNode:node];
             node;
         });
@@ -351,7 +356,8 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
             node.camera.zFar = 200.f;
             node.camera.zNear = .1f;
             [self.scene.rootNode addChildNode:node];
-            node.eulerAngles = SCNVector3Make(-0.7, 0.6, 0);
+            //node.eulerAngles = SCNVector3Make(-0.7, 0.5, 0);
+            node.eulerAngles = SCNVector3Make(-M_PI * 0.25, M_PI * 0.25, 0);
             node;
         });
         [_camera addChildNode:self.light];
@@ -396,6 +402,59 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
 
 #pragma mark 隐藏状态栏
 -(BOOL)prefersStatusBarHidden {
+    return YES;
+}
+
+static double beginValue = 0.0;
+static CGPoint originPoint;
+
+- (void)onPan:(UIPanGestureRecognizer *)ges{
+    switch (ges.state) {
+        case UIGestureRecognizerStateBegan:{
+            originPoint = [ges locationInView:ges.view];
+        }
+            break;
+        case UIGestureRecognizerStateChanged:
+        {
+            CGPoint mpoint = [ges locationInView:ges.view];
+            CGFloat xdis = mpoint.x - originPoint.x;
+            CGFloat ydis = mpoint.y - originPoint.y;
+            CGFloat factor = 1e-3;
+            xdis = xdis * factor;
+            ydis = ydis * factor;
+            NSLog(@"xdis:%.3f", xdis);
+            
+            CGFloat pinch = ydis * 1e-1;
+            
+            SCNVector3 euler = self.camera.eulerAngles;
+            
+            //self.camera.eulerAngles = SCNVector3Make(euler.x + pinch, euler.y, euler.z);
+            
+            SCNVector3 rawPos = self.camera.position;
+            //x轴平移效果
+            self.camera.position = SCNVector3Make(rawPos.x + xdis, rawPos.y, rawPos.z - xdis);
+            //y轴
+            self.camera.position = SCNVector3Make(rawPos.x - xdis, rawPos.y + ydis, rawPos.z + xdis);
+            NSLog(@"x:%.2f y:%.2f z:%.2f",
+                  self.camera.position.x,
+                  self.camera.position.y,
+                  self.camera.position.z);
+        }
+            break;
+        case UIGestureRecognizerStateEnded:
+        case UIGestureRecognizerStateCancelled:
+        case UIGestureRecognizerStateFailed:
+            break;
+        default:
+            break;
+    }
+    
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer{
+    if ([gestureRecognizer isKindOfClass:[UIPanGestureRecognizer class]]) {
+        return NO;
+    }
     return YES;
 }
 
