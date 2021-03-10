@@ -8,6 +8,7 @@
 
 #import "ViewController.h"
 #import <SceneKit/SceneKit.h>
+#import "metalTypes.h"
 
 @implementation NSObject (Util)
 
@@ -24,6 +25,7 @@
     renderPipeDescriptor.fragmentFunction = fragmentFunction;
     //必须和scnview的匹配
     renderPipeDescriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
+    renderPipeDescriptor.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
     
     NSError * error = nil;
     
@@ -65,8 +67,24 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
 @property(nonatomic, strong)SCNRenderer *render;
 @property(nonatomic)NSInteger score;
 
+#pragma mark - metal
+
 @property(nonatomic, strong)id<MTLCommandQueue> commandQueue;
 @property(nonatomic, strong)id<MTLRenderPipelineState> renderPipelineState;
+
+@property (nonatomic, strong) id <MTLBuffer> vertexBuffer;
+@property (nonatomic, strong) id <MTLBuffer> convertMatrix;
+@property (nonatomic, strong) id <MTLTexture> texture;
+@property (nonatomic, assign) NSUInteger vertexCount;
+
+@property (atomic, assign) CVPixelBufferRef pixelBuffer;
+@property (nonatomic, assign) CVMetalTextureCacheRef textureCache;
+@property (atomic, strong) id <MTLTexture> textureY;
+@property (atomic, strong) id <MTLTexture> textureUV;
+
+@property (atomic, assign) CGSize scnViewSize;
+
+@property (atomic, strong) id <MTLComputePipelineState> computePipielineSate;
 
 @end
 
@@ -76,30 +94,277 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
     [super viewDidLoad];
     if(self.scnView && self.floor && self.jumper) {
         [self createFirstPlatform];
+        [self setupVertexsWithWidthScaling:1.0f heightScaling:1.0f];
+        [self setupMatrix];
+        [self initMetal];
         [self initRender];
+        UIImage * img = [UIImage imageNamed:@"robot"];
+        CVPixelBufferRef pixelBufRef = [self pixelBufferFromCGImage:img.CGImage];
+        if (pixelBufRef) {
+            [self setupTextureWithPixelBuffer:pixelBufRef];
+        }
     }
 }
 
-- (void)initRender{
+- (void)viewDidLayoutSubviews{
+    [super viewDidLayoutSubviews];
+    if (CGSizeEqualToSize(self.scnViewSize, CGSizeZero)) {
+        self.scnViewSize = self.scnView.frame.size;
+    }
+}
+
+- (void)initMetal{
     self.scnView.delegate = self;
-//    if (self.scnView.device) {
-//        self.render = [SCNRenderer rendererWithDevice:self.scnView.device options:nil];
-//        self.render.scene = self.scnView.scene;
-//        self.render.delegate = self;
-//        self.render.pointOfView = self.scnView.scene.rootNode;
-//        NSLog(@"initRender:%@", self.render);
-//    }
     NSArray * output = [self createPipeLineState:self.scnView.device];
     self.renderPipelineState = output[0];
     self.commandQueue = output[1];
+    CVMetalTextureCacheCreate(NULL, NULL, [self device], NULL, &_textureCache);
     
+    id <MTLLibrary> library = [[self device] newDefaultLibrary];
+    id <MTLFunction> kernelFunction = [library newFunctionWithName:@"rgb2hsvKernelNonuniform"];
+    NSError * cmpPiplineInstanceErr = nil;
+    self.computePipielineSate = [[self device] newComputePipelineStateWithFunction:kernelFunction error:&cmpPiplineInstanceErr];
+    assert(!cmpPiplineInstanceErr);
     
 }
 
-
-
-- (void)initMetal{
+- (void)initRender{
     
+    if (self.scnView.device) {
+        self.render = [SCNRenderer rendererWithDevice:[self device] options:nil];
+        self.render.scene = self.scnView.scene;
+        self.render.delegate = self;
+        self.render.pointOfView = self.scnView.scene.rootNode;
+        NSLog(@"initRender:%@", self.render);
+    }
+}
+
+- (id<MTLDevice>)device{
+    return self.scnView.device;
+}
+
+// 生成Y纹理和UV纹理，提供给MTKView的代理方法使用
+- (void)setupTextureWithPixelBuffer:(CVPixelBufferRef)pixelBuffer {
+    if (!pixelBuffer) {
+        return;
+    }
+    
+    if (CVPixelBufferGetPixelFormatType(pixelBuffer) == MTLPixelFormatRG8Snorm) {
+        //rgb
+        size_t width = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0);
+        size_t height = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0);
+        
+        // 像素颜色格式 MTLPixelFormatR8Unorm 表示只取R一个颜色分支
+        MTLPixelFormat pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer);
+
+        CVMetalTextureRef texture = NULL;
+        CVMetalTextureCacheRef textureCache = NULL;
+        
+        // 开辟纹理缓存区
+        CVReturn TextureCacheCreateStatus =CVMetalTextureCacheCreate(NULL, NULL, self.device, NULL, &textureCache);
+        if(TextureCacheCreateStatus == kCVReturnSuccess) {
+//            NSLog(@"CVMetalTextureCacheCreate is success");
+        }
+        
+        // 根据CVPixelBufferRef数据，使用CVMetalTextureCacheRef，创建CVMetalTextureRef
+        // 0表示Y纹理
+        CVReturn status = CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, self.textureCache, pixelBuffer, NULL, pixelFormat, width, height, 0, &texture);
+        if(status == kCVReturnSuccess) {
+            // 根据纹理CVMetalTextureRef 创建id <MTLTexture>
+            self.textureY = CVMetalTextureGetTexture(texture);
+            
+            // 使用完毕释放资源
+            CFRelease(texture);
+            
+//            NSLog(@"create Y texture is Success");
+        } else {
+//            NSLog(@"create Y texture is failed");
+//            NSLog(@"status == %d", status);
+        }
+        CFRelease(textureCache);
+        return;
+    }
+    
+    // Y纹理
+    {
+        // 0表示Y纹理
+        size_t width = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0);
+        size_t height = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0);
+        
+        
+        // 像素颜色格式 MTLPixelFormatR8Unorm 表示只取R一个颜色分支
+        MTLPixelFormat pixelFormat = MTLPixelFormatR8Unorm;
+
+        CVMetalTextureRef texture = NULL;
+        CVMetalTextureCacheRef textureCache = NULL;
+        
+        // 开辟纹理缓存区
+        CVReturn TextureCacheCreateStatus =CVMetalTextureCacheCreate(NULL, NULL, self.device, NULL, &textureCache);
+        if(TextureCacheCreateStatus == kCVReturnSuccess) {
+//            NSLog(@"CVMetalTextureCacheCreate is success");
+        }
+        
+        // 根据CVPixelBufferRef数据，使用CVMetalTextureCacheRef，创建CVMetalTextureRef
+        // 0表示Y纹理
+        CVReturn status = CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, self.textureCache, pixelBuffer, NULL, pixelFormat, width, height, 0, &texture);
+        if(status == kCVReturnSuccess) {
+            // 根据纹理CVMetalTextureRef 创建id <MTLTexture>
+            self.textureY = CVMetalTextureGetTexture(texture);
+            
+            // 使用完毕释放资源
+            CFRelease(texture);
+            
+//            NSLog(@"create Y texture is Success");
+        } else {
+//            NSLog(@"create Y texture is failed");
+//            NSLog(@"status == %d", status);
+        }
+        CFRelease(textureCache);
+    }
+    
+    // UV纹理
+    {
+        // 1表示UV纹理
+        size_t width = CVPixelBufferGetWidthOfPlane(pixelBuffer, 1);
+        size_t height = CVPixelBufferGetHeightOfPlane(pixelBuffer, 1);
+        
+        // 像素颜色格式 MTLPixelFormatRG8Unorm 表示只取RG两个颜色分支
+        MTLPixelFormat pixelFormat = MTLPixelFormatRG8Unorm;
+        
+        CVMetalTextureRef texture = NULL;
+        CVMetalTextureCacheRef textureCache = NULL;
+        // 开辟纹理缓存区
+        CVReturn TextureCacheCreateStatus =CVMetalTextureCacheCreate(NULL, NULL, self.device, NULL, &textureCache);
+        if(TextureCacheCreateStatus == kCVReturnSuccess) {
+//            NSLog(@"CVMetalTextureCacheCreate is success");
+        }
+        
+        // 根据CVPixelBufferRef数据，使用CVMetalTextureCacheRef，创建CVMetalTextureRef
+        // 1表示UV纹理
+        
+        CVReturn status = CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, self.textureCache, pixelBuffer, NULL, pixelFormat, width, height, 1, &texture);
+        if(status == kCVReturnSuccess) {
+            // 根据纹理CVMetalTextureRef 创建id <MTLTexture>
+            self.textureUV = CVMetalTextureGetTexture(texture);
+            
+            // 使用完毕释放资源
+            CFRelease(texture);
+            
+//            NSLog(@"create UV texture is Success");
+        } else {
+//            NSLog(@"create UV texture is failed");
+//            NSLog(@"status == %d", status);
+        }
+        
+        CFRelease(textureCache);
+    }
+}
+
+- (CVPixelBufferRef) pixelBufferFromCGImage: (CGImageRef) image
+{
+    NSDictionary *options = @{
+                              (NSString*)kCVPixelBufferCGImageCompatibilityKey : @YES,
+                              (NSString*)kCVPixelBufferCGBitmapContextCompatibilityKey : @YES,
+                              (id) kCVPixelBufferMetalCompatibilityKey: @(TRUE),
+                              (id) kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange),
+                              };
+
+    CVPixelBufferRef pxbuffer = NULL;
+    CVReturn status = CVPixelBufferCreate(kCFAllocatorDefault, CGImageGetWidth(image),
+                        CGImageGetHeight(image), kCVPixelFormatType_32ARGB, (__bridge CFDictionaryRef) options,
+                        &pxbuffer);
+    if (status!=kCVReturnSuccess) {
+        NSLog(@"Operation failed");
+    }
+    NSParameterAssert(status == kCVReturnSuccess && pxbuffer != NULL);
+
+    CVPixelBufferLockBaseAddress(pxbuffer, 0);
+    void *pxdata = CVPixelBufferGetBaseAddress(pxbuffer);
+
+    CGColorSpaceRef rgbColorSpace = CGColorSpaceCreateDeviceRGB();
+    CGContextRef context = CGBitmapContextCreate(pxdata, CGImageGetWidth(image),
+                                                 CGImageGetHeight(image), 8, 4*CGImageGetWidth(image), rgbColorSpace,
+                                                 kCGImageAlphaNoneSkipFirst);
+    NSParameterAssert(context);
+
+    CGContextConcatCTM(context, CGAffineTransformMakeRotation(0));
+    CGAffineTransform flipVertical = CGAffineTransformMake( 1, 0, 0, -1, 0, CGImageGetHeight(image) );
+    CGContextConcatCTM(context, flipVertical);
+    CGAffineTransform flipHorizontal = CGAffineTransformMake( -1.0, 0.0, 0.0, 1.0, CGImageGetWidth(image), 0.0 );
+    CGContextConcatCTM(context, flipHorizontal);
+
+    CGContextDrawImage(context, CGRectMake(0, 0, CGImageGetWidth(image),
+                                           CGImageGetHeight(image)), image);
+    CGColorSpaceRelease(rgbColorSpace);
+    CGContextRelease(context);
+
+    CVPixelBufferUnlockBaseAddress(pxbuffer, 0);
+    return pxbuffer;
+}
+
+
+// 设置YUV->RGB转换的矩阵
+- (void)setupMatrix {
+    
+    //1.转化矩阵
+    // BT.601, which is the standard for SDTV.
+    matrix_float3x3 kColorConversion601DefaultMatrix = (matrix_float3x3){
+        (simd_float3){1.164,  1.164, 1.164},
+        (simd_float3){0.0, -0.392, 2.017},
+        (simd_float3){1.596, -0.813,   0.0},
+    };
+    
+    // BT.601 full range
+    matrix_float3x3 kColorConversion601FullRangeMatrix = (matrix_float3x3){
+        (simd_float3){1.0,    1.0,    1.0},
+        (simd_float3){0.0,    -0.343, 1.765},
+        (simd_float3){1.4,    -0.711, 0.0},
+    };
+    
+    // BT.709, which is the standard for HDTV.
+    matrix_float3x3 kColorConversion709DefaultMatrix = (matrix_float3x3){
+        (simd_float3){1.164,  1.164, 1.164},
+        (simd_float3){0.0, -0.213, 2.112},
+        (simd_float3){1.793, -0.533,   0.0},
+    };
+    
+    //2.偏移量
+    vector_float3 kColorConversion601FullRangeOffset = (vector_float3){ -(16.0/255.0), -0.5, -0.5};
+    
+    //3.创建转化矩阵结构体.
+    YYVideoYUVToRGBConvertMatrix matrix;
+    //设置转化矩阵
+    /*
+     kColorConversion601DefaultMatrix；
+     kColorConversion601FullRangeMatrix；
+     kColorConversion709DefaultMatrix；
+     */
+    matrix.matrix = kColorConversion601FullRangeMatrix;
+    //设置offset偏移量
+    matrix.offset = kColorConversion601FullRangeOffset;
+    
+    //4.创建转换矩阵缓存区.
+    self.convertMatrix = [[self device] newBufferWithBytes:&matrix length:sizeof(YYVideoYUVToRGBConvertMatrix) options:MTLResourceStorageModeShared];
+}
+
+- (void)setupVertexsWithWidthScaling:(CGFloat)widthScaling heightScaling:(CGFloat)heightScaling {
+    // 1.顶点纹理数组
+    // 顶点x,y,z,w  纹理x,y
+    // 因为图片和视频的默认纹理是反的 左上 00 右上10 左下 01 右下11
+    // // 左下 右下
+    YYVideoVertex vertexArray[] = {
+        {{-1.0 * widthScaling, -1.0 * heightScaling, 0.0, 1.0}, {0.0, 1.0}},
+        {{1.0 * widthScaling, -1.0 * heightScaling, 0.0, 1.0}, {1.0, 1.0}},
+        {{-1.0 * widthScaling, 1.0 * heightScaling, 0.0, 1.0}, {0.0, 0.0}}, //左上
+        {{1.0 * widthScaling, 1.0 * heightScaling, 0.0, 1.0}, {1.0, 0.0}}, // 右上
+    };
+    
+    // 2.生成顶点缓存
+    // MTLResourceStorageModeShared 属性可共享的，表示可以被顶点或者片元函数或者其他函数使用
+    self.vertexBuffer = [self.device newBufferWithBytes:vertexArray length:sizeof(vertexArray) options:MTLResourceStorageModeShared];
+    
+    // 3.获取顶点数量
+    self.vertexCount = sizeof(vertexArray) / sizeof(YYVideoVertex);
 }
 
 - (void)viewDidAppear:(BOOL)animated{
@@ -330,8 +595,8 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
             longPressGesture.delegate = self;
             UIPanGestureRecognizer * pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onPan:)];
             pan.delegate = self;
-            view.gestureRecognizers = @[pan,longPressGesture];
-            //view.gestureRecognizers = @[pan];
+            //view.gestureRecognizers = @[longPressGesture];
+            view.gestureRecognizers = @[pan];
             view;
         });
     }
@@ -349,7 +614,7 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
             SCNNode *node = [SCNNode node];
             node.geometry = ({
                 SCNFloor *floor = [SCNFloor floor];
-                floor.firstMaterial.diffuse.contents = UIColor.whiteColor;
+                //floor.firstMaterial.diffuse.contents = UIColor.clearColor;
                 floor;
             });
             node.physicsBody = ({
@@ -485,7 +750,6 @@ static CGPoint originPoint;
             NSLog(@"xdis:%.3f", xdis);
             
             CGFloat pinch = ydis * 1e-1;
-            
             SCNNode * camNode = self.camera;
             SCNVector3 euler = camNode.eulerAngles;
             
@@ -493,8 +757,8 @@ static CGPoint originPoint;
             
             SCNVector3 rawPos = camNode.position;
             
-//            /int effect = 0;
-            switch (3) {
+            //int effect = 0;
+            switch (2) {
                 case 0:{
                     //x轴平移效果
                     camNode.position = SCNVector3Make(rawPos.x + xdis, rawPos.y, rawPos.z - xdis);
@@ -542,47 +806,75 @@ static CGPoint originPoint;
 }
 
 - (void)renderer:(id <SCNSceneRenderer>)renderer willRenderScene:(SCNScene *)scene atTime:(NSTimeInterval)time{
+    [self dorender:renderer scene:scene atTime:time];
+    static int i = 0;
+    UIImage * image = [UIImage imageNamed:@"robot"];
+    if (i % 2 == 1) {
+        image = [UIImage imageNamed:@"customTemplateCover"];
+    }
+    //self.floor.geometry.firstMaterial.diffuse.contents = image;
+    self.floor.geometry.firstMaterial.diffuse.contents = self.textureY;
+    i++;
+}
+
+- (void)renderer:(id<SCNSceneRenderer>)renderer didRenderScene:(SCNScene *)scene atTime:(NSTimeInterval)time{
+//    [self dorender:renderer scene:scene atTime:time];
+}
+
+- (void)dorender:(id<SCNSceneRenderer>)renderer scene:(SCNScene *)scene atTime:(NSTimeInterval)time{
+    
+    NSUInteger w = self.computePipielineSate.threadExecutionWidth;
+    NSUInteger h = self.computePipielineSate.maxTotalThreadsPerThreadgroup / w;
+    NSLog(@"threadGroupSize😄:%d %d %d", w, h, self.computePipielineSate.maxTotalThreadsPerThreadgroup);
     
     id <MTLDevice> device = renderer.device;
     MTLRenderPassDescriptor * renderPassDescriptor = self.scnView.currentRenderPassDescriptor;
     if (!renderPassDescriptor) {
         return;
     }
-    id <MTLCommandBuffer> commandBuffer = [self.commandQueue commandBuffer];
     
-    //id <MTLRenderCommandEncoder> renderCommandEncoder = [commandBuffer renderCommandEncoderWithDescriptor:renderPassDescriptor];
-    id <MTLRenderCommandEncoder> renderCommandEncoder = renderer.currentRenderCommandEncoder;
+    id <MTLCommandBuffer> commandBuffer = [renderer.commandQueue commandBuffer];
+//    id <MTLCommandBuffer> commandBuffer = [self.commandQueue commandBuffer]; //
+    
+    id <MTLRenderCommandEncoder> renderCommandEncoder = [commandBuffer renderCommandEncoderWithDescriptor:renderPassDescriptor];
+    
+    //id <MTLRenderCommandEncoder> renderCommandEncoder = renderer.currentRenderCommandEncoder; //不应该使用当前的commander encoder
+    renderCommandEncoder.label = [NSString stringWithFormat:@"%f", time];
     if (!renderCommandEncoder) {
         return;
     }
-    renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(1.0, 1.0, 1.0, 1.0f);
-    [renderCommandEncoder setViewport:(MTLViewport){0, 0, 300, 300, -1.0, 1.0}];
+    renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0f);
+    
     if (!self.renderPipelineState) {
         return;
     }
     
+    [renderCommandEncoder setRenderPipelineState:self.renderPipelineState];
     
-    id <MTLLibrary> library = [device newDefaultLibrary];
-    id <MTLFunction> vertexFunction = [library newFunctionWithName:@"vertexVideoShader"];
-    id <MTLFunction> fragmentFunction = [library newFunctionWithName:@"fragmentVideoShader"];
-    MTLRenderPipelineDescriptor * renderPipeDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
-    renderPipeDescriptor.vertexFunction = vertexFunction;
-    renderPipeDescriptor.fragmentFunction = fragmentFunction;
-    renderPipeDescriptor.colorAttachments[0].pixelFormat = renderer.colorPixelFormat;
-    NSError * error = nil;
-    NSLog(@"========>renderer.colorPixelFormat:%lu", (unsigned long)renderer.colorPixelFormat);
-    id <MTLRenderPipelineState> renderPipelineState = [device newRenderPipelineStateWithDescriptor:renderPipeDescriptor error:&error];
-    [renderCommandEncoder setRenderPipelineState:renderPipelineState];
+    [renderCommandEncoder setViewport:(MTLViewport){0, 0, self.scnViewSize.width, self.scnViewSize.height, -1.0, 1.0}];
+    [renderCommandEncoder setRenderPipelineState:self.renderPipelineState];
+    [renderCommandEncoder setVertexBuffer:self.vertexBuffer offset:0 atIndex:YYVideoVertexInputIndexVertexs];
+    [renderCommandEncoder setFragmentBuffer:self.convertMatrix offset:0 atIndex:YYVideoConvertMatrixIndexYUVToRGB];
+    // 设置Y UV纹理
+    if (self.textureY) {
+        [renderCommandEncoder setFragmentTexture:self.textureY atIndex:YYVidoTextureIndexYTexture];
+//        self.textureY = nil;
+    }
     
-    //[renderCommandEncoder setRenderPipelineState:self.renderPipelineState];
+    if (self.textureUV) {
+        [renderCommandEncoder setFragmentTexture:self.textureUV atIndex:YYVidoTextureIndexUVTexture];
+//        self.textureUV = nil;
+    }
+    [renderCommandEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:self.vertexCount];
     
     [renderCommandEncoder endEncoding];
+    
+
     
     
     [commandBuffer commit];
     
     NSLog(@"willRenderScene");
-    
 }
 
 @end
