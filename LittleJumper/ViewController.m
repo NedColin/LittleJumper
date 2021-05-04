@@ -8,14 +8,13 @@
 
 #import "ViewController.h"
 #import <SceneKit/SceneKit.h>
-#import "metalTypes.h"
+#import "MetalTypes.h"
 
 @implementation NSObject (Util)
 
 - (NSArray *)createPipeLineState:(id <MTLDevice>)device{
     
     id <MTLLibrary> library = [device newDefaultLibrary];
-    
     id <MTLFunction> vertexFunction = [library newFunctionWithName:@"vertexVideoShader"];
     id <MTLFunction> fragmentFunction = [library newFunctionWithName:@"fragmentVideoShader"];
     
@@ -163,7 +162,7 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
         // 开辟纹理缓存区
         CVReturn TextureCacheCreateStatus =CVMetalTextureCacheCreate(NULL, NULL, self.device, NULL, &textureCache);
         if(TextureCacheCreateStatus == kCVReturnSuccess) {
-//            NSLog(@"CVMetalTextureCacheCreate is success");
+            NSLog(@"CVMetalTextureCacheCreate is success");
         }
         
         // 根据CVPixelBufferRef数据，使用CVMetalTextureCacheRef，创建CVMetalTextureRef
@@ -176,10 +175,10 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
             // 使用完毕释放资源
             CFRelease(texture);
             
-//            NSLog(@"create Y texture is Success");
+            NSLog(@"create Y texture is Success");
         } else {
-//            NSLog(@"create Y texture is failed");
-//            NSLog(@"status == %d", status);
+            NSLog(@"create Y texture is failed");
+            NSLog(@"status == %d", status);
         }
         CFRelease(textureCache);
         return;
@@ -595,7 +594,7 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
             longPressGesture.delegate = self;
             UIPanGestureRecognizer * pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onPan:)];
             pan.delegate = self;
-            //view.gestureRecognizers = @[longPressGesture];
+//            view.gestureRecognizers = @[longPressGesture];
             view.gestureRecognizers = @[pan];
             view;
         });
@@ -681,6 +680,7 @@ typedef NS_OPTIONS(NSUInteger, CollisionDetectionMask) {
             node.camera.zFar = 200.f;
             node.camera.zNear = .1f;
             [self.scene.rootNode addChildNode:node];
+            //node.eulerAngles = SCNVector3Make(-M_PI * 0.25, M_PI * 0.25, 0);
             //node.eulerAngles = SCNVector3Make(-M_PI * 0.25, M_PI * 0.25, 0);
             node.eulerAngles = SCNVector3Make(-M_PI * 0.25, M_PI * 0.25, 0);
             node;
@@ -805,23 +805,35 @@ static CGPoint originPoint;
     return YES;
 }
 
+#define UsingMetal (0)
+
 - (void)renderer:(id <SCNSceneRenderer>)renderer willRenderScene:(SCNScene *)scene atTime:(NSTimeInterval)time{
-    [self dorender:renderer scene:scene atTime:time];
-    static int i = 0;
-    UIImage * image = [UIImage imageNamed:@"robot"];
-    if (i % 2 == 1) {
-        image = [UIImage imageNamed:@"customTemplateCover"];
+    
+    if (UsingMetal) {
+        [self dorenderWithMetal:renderer scene:scene atTime:time];
+    }else{
+        
     }
-    //self.floor.geometry.firstMaterial.diffuse.contents = image;
-    self.floor.geometry.firstMaterial.diffuse.contents = self.textureY;
-    i++;
+
 }
 
 - (void)renderer:(id<SCNSceneRenderer>)renderer didRenderScene:(SCNScene *)scene atTime:(NSTimeInterval)time{
-//    [self dorender:renderer scene:scene atTime:time];
+    if (UsingMetal) {
+        [self dorenderWithMetal:renderer scene:scene atTime:time];
+    }else{
+        static int i = 0;
+        int idx = i % 60;
+        UIImage * image = [UIImage imageNamed:[NSString stringWithFormat:@"%d", idx]];
+        i++;
+        self.floor.geometry.firstMaterial.diffuse.contents = image;
+        self.floor.geometry.firstMaterial.diffuse.contentsTransform = SCNMatrix4Rotate(SCNMatrix4Identity, 0, 45, 0, 0);
+//        self.floor.geometry.firstMaterial.diffuse.contents = self.textureY;
+        
+    }
+    
 }
 
-- (void)dorender:(id<SCNSceneRenderer>)renderer scene:(SCNScene *)scene atTime:(NSTimeInterval)time{
+- (void)dorenderWithMetal:(id<SCNSceneRenderer>)renderer scene:(SCNScene *)scene atTime:(NSTimeInterval)time{
     
     NSUInteger w = self.computePipielineSate.threadExecutionWidth;
     NSUInteger h = self.computePipielineSate.maxTotalThreadsPerThreadgroup / w;
